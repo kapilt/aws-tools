@@ -1,4 +1,4 @@
-# Not Used.. soley being migrated.
+# Not Used.. slowly being migrated.
 from dynamodb_mapper.model import DynamoDBModel
 
 

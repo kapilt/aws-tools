@@ -7,8 +7,6 @@ Per Configuration, can take n daily, n weekly, n monthly snapshots.
 
 """
 
-#from contextlib import contextmanager
-
 import argparse
 from datetime import datetime, timedelta
 from dateutil.parser import parse as date_parse
@@ -19,13 +17,6 @@ import operator
 import subprocess
 import yaml
 
-#import random
-#import string
-#import sys
-#import time
-#import uuid
-
-#from common import KVFile, Unit, BaseController
 from awsjuju.common import get_or_create_table
 from awsjuju.lock import Lock
 
@@ -36,6 +27,9 @@ INSTANCE_TABLE = "awsjuju-snapshot-instances"
 
 
 class SnapshotRunner(object):
+
+    # key to min time since last backup b4 we take a new one for the
+    # period.
 
     allowed_periods = {
         "daily": timedelta(0.9),
@@ -134,9 +128,12 @@ class SnapshotRunner(object):
         snapshots.insert(0, snapshot)
         if len(snapshots) <= backup_count:
             return
+        log.info("Trimming excess %s snapshots %s" % (
+            period,
+            [s.tags.get('Name') for s in snapshots[backup_count:]]))
 
-            for s in snapshots[backup_count:]:
-                s.delete()
+        for s in snapshots[backup_count:]:
+            s.delete()
 
     def register(self, options):
         """Register an instance for the snapshot system.
