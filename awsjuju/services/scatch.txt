@@ -1,0 +1,46 @@
+
+
+# class Controller(BaseController):
+
+#     _table_name = "awsjuju-snapshot-instances"
+#     _table_options = {
+#         'hash': 'app_id',
+#         'range': 'instance_id',
+#         'throughput': (50, 10)}  # (read, write, 10usd month)
+
+#     def __init__(self, unit=None, group_rules=None):
+#         state_path = os.path.join(os.environ.get("CHARM_DIR", ""), "rds.state")
+#         self._state = KVFile(state_path)
+#         self.unit = unit or Unit()
+#         self._group_rules = group_rules or ()
+
+#     # Hooks
+#     def on_config_changed(self):
+#         """ Configuration changed.
+#         """
+#         config = self.get_config()
+#         return config
+
+#     def on_joined(self):
+#         """ Record the unit and the instance id.
+#         """
+#         ec2 = self.get_ec2()
+#         instance = self.get_instance(ec2)
+#         db = self.get_db()
+
+#         with self.get_lock("%s-%s" % (self.unit.env_id, self.unit.unit_name)):
+#             record = db.new_item(
+#                 self.unit.env_id, "%s-%s" % (self.unit.relation_id, self.unit.remote_unit),
+#                 {'instance_id': instance_id, 'addr': ip_address,
+#                  'host': host_name, 'zone': config['zone']})
+#             record.put()
+
+#     def on_depart(self):
+#         """
+#         """
+#         ec2 = self.get_ec2()
+#         instance = self.get_instance(ec2)
+
+#     def on_broken(self):
+#         """
+#         """
