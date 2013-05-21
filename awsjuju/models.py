@@ -26,18 +26,3 @@ class ELB(DynamoDBModel):
         "instance_id": str,
         "zone": str,
     }
-
-
-class Snapshots(DynamoDBModel):
-
-    __table__ = "manage-snapshots"
-
-    __hash_key__ = "app_id"
-    __range_key__ = "unit_id"
-
-    _schema = {
-        "app_id": str,
-        "unit_id": str,
-        "vol_id": str,
-        "created": int,
-    }

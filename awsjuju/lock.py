@@ -26,7 +26,8 @@ class Lock(object):
 
     attempts = 3
 
-    def __init__(self, client, client_id, table, key, ttl=60, delay=5, attempts=None):
+    def __init__(self, client, client_id, table, key, ttl=60, delay=5,
+                 attempts=None):
         self._client = client
         self._table = table
         self._key = key
@@ -40,8 +41,6 @@ class Lock(object):
 
     def acquire(self, key=None):
         attempts = self.attempts
-        #if self.gc() is False and self._delay:
-        #    time.sleep(self._delay)
         if key:
             self._key = key
         while attempts:
@@ -56,7 +55,6 @@ class Lock(object):
                 self._locked = t
                 return self
             except CheckFailed:
-                #print "Acquire e", attempts, self._client_id, e
                 attempts -= 1
                 if self._delay:
                     time.sleep(self._delay)

@@ -59,21 +59,24 @@ class SnapshotRunner(object):
                 i = r.instances.pop()
                 yield (record, i)
 
-    def get_instance_volume(self, i):
+    def get_instance_volumes(self, i):
         if i.root_device_type != "ebs":
             log.warning(
                 "Not backing up instance: %s non ebs root device", i.id)
             return None
-        devs = i.block_device_mapping.values()
+        devs = i.block_device_mapping.items()
         # Refuse the temptation to guess. If there are multiple volumes
         # attached to an instance, it could be raided/lvm/etc and we need
         # coordination with the instance to get a multi-volume consistent snap.
-        if len(devs) > 1:
+        if len(devs) > 2:
             log.warning(
                 "Not backing up instance: %s, more than one volume", i.id)
             return None
-        vol_id = devs.pop().volume_id
-        return vol_id
+
+        for dev_name, bdt in devs:
+            if not bdt.volume_id:
+                continue
+            yield bdt.volume_id, dev_name
 
     def run_period(self, options):
         """ Create backups for the given period for all registered instances.
@@ -83,14 +86,11 @@ class SnapshotRunner(object):
         log.info("Creating snapshots for %s on %s" % (
             period, now.strftime("%Y/%m/%d")))
         for r, i in self.get_snapshot_instances():
-            vol_id = self.get_instance_volume(i)
-            if vol_id is None:
-                continue
-
             with self.lock.acquire("snapshot-%s" % i.id):
-                self._snapshot_instance(r, i, vol_id, now, period)
+                for vol_id, dev in self.get_instance_volumes(i):
+                    self._snapshot_instance(r, i, vol_id, dev, now, period)
 
-    def _snapshot_instance(self, r, i, vol_id, now, period):
+    def _snapshot_instance(self, r, i, vol_id, dev, now, period):
         """
         arg: r -> record
         arg: i -> boto ec2 instance
@@ -122,6 +122,7 @@ class SnapshotRunner(object):
         snapshot.add_tag('Name', description)
         snapshot.add_tag('app_id', r['app_id'])
         snapshot.add_tag('inst_snap', "%s/%s" % (i.id, period))
+        snapshot.add_tag('dev', dev)
 
         # Trim extras
         backup_count = self.config.get("%s-backups" % period)

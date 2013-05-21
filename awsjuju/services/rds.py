@@ -54,7 +54,8 @@ class Config(object):
             ('multi-az', 'multi_az'),
             ('engine-version', 'engine_version'),
             ('auto-minor-version-upgrade', 'auto_minor_version_upgrade'),
-            ('license-mode', 'license_model')]:
+            ('license-mode', 'license_model')
+            ]:
             if source in config:
                 params[target] = config[source]
         return params

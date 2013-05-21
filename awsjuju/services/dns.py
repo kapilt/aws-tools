@@ -22,7 +22,8 @@ class Controller(BaseController):
         from area53 import route53
         dns = route53.get_zone(config['zone'])
         if dns is None:
-            raise InvalidConfig("Invalid zone %s, use domain name" % config['zone'])
+            raise InvalidConfig(
+                "Invalid zone %s, use domain name" % config['zone'])
         return dns
 
     def get_instance_address(self):
@@ -45,11 +46,13 @@ class Controller(BaseController):
         dns = self.get_dns(config)
         db = self.get_db()
 
-        with self.get_lock("%s-%s" % (self.unit.env_id, self.unit.relation_id)):
+        with self.get_lock("%s-%s" % (
+                self.unit.env_id, self.unit.relation_id)):
             host_name = self.get_hostname(config)
             instance_id, ip_address = self.get_instance_address()
             record = db.new_item(
-                self.unit.env_id, "%s-%s" % (self.unit.relation_id, self.unit.remote_unit),
+                self.unit.env_id, "%s-%s" % (
+                    self.unit.relation_id, self.unit.remote_unit),
                 {'instance_id': instance_id, 'addr': ip_address,
                  'host': host_name, 'zone': config['zone']})
             entry = dns.get_a(host_name)
@@ -64,9 +67,11 @@ class Controller(BaseController):
         dns = self.get_dns(config)
         db = self.get_db()
 
-        with self.get_lock("%s-%s" % (self.unit.env_id, self.unit.relation_id)):
+        with self.get_lock(
+                "%s-%s" % (self.unit.env_id, self.unit.relation_id)):
             record = db.get_item(
-                self.unit.env_id, "%s-%s" % (self.unit.relation_id, self.unit.remote_unit))
+                self.unit.env_id, "%s-%s" % (
+                    self.unit.relation_id, self.unit.remote_unit))
             host_name = self.get_hostname(config)
             dns.delete_a(host_name)
             record.delete()
@@ -76,7 +81,8 @@ class Controller(BaseController):
         dns = self.get_dns(config)
         db = self.get_db()
 
-        with self.get_lock("%s-%s" % (self.unit.env_id, self.unit.relation_id)):
+        with self.get_lock("%s-%s" % (
+                self.unit.env_id, self.unit.relation_id)):
             result = db.query(
                 self.unit.env_id,
                 range_key_condition=self.query_begins(self.unit.relation_id))

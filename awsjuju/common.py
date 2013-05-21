@@ -113,7 +113,8 @@ class BaseController(object):
             raise RuntimeError(
                 "Db requested but table not specified %s",
                 self.__class__.__name__)
-        self._data_table = self._get_table(self._table_name, self._table_options)
+        self._data_table = self._get_table(
+            self._table_name, self._table_options)
         return self._data_table
 
 
