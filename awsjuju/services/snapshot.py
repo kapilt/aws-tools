@@ -1,10 +1,7 @@
 """
 Backup/Snapshot policy management for AWS Instances.
 
-
 Per Configuration, can take n daily, n weekly, n monthly snapshots.
-
-
 """
 
 import argparse
@@ -17,7 +14,7 @@ import operator
 import subprocess
 import yaml
 
-from awsjuju.common import get_or_create_table
+from awsjuju.common import get_or_create_table, BaseController, Unit
 from awsjuju.lock import Lock
 
 log = logging.getLogger("aws-snapshot")
@@ -42,8 +39,24 @@ class SnapshotRunner(object):
         self.instance_db = instance_db
         self.lock = lock
 
-    def get_snapshot_instances(self):
+    def get_snapshot_instances(self, options):
         """ Get all instances registered for auto snapshots
+        """
+
+        if options.tag:
+            return self._get_tagged_instances(options.tag)
+
+        return self._get_registered_instances()
+
+    def _get_tagged_instances(self, tag):
+        """Support instance selection for backup based on a tag value.
+        """
+        tag_name, tag_value = tag.split(":", 1)
+        return self.ec2.get_all_instances(
+            filters={'tag:%s' % tag_name: tag_value})
+
+    def _get_registered_instances(self):
+        """Support instance backup based on registration.
         """
         # hmm.. scan over all apps and all instances, sort of worst case.
         # this could be made more efficient, batching 20 instances at a time.
@@ -63,7 +76,7 @@ class SnapshotRunner(object):
         if i.root_device_type != "ebs":
             log.warning(
                 "Not backing up instance: %s non ebs root device", i.id)
-            return None
+            return
         devs = i.block_device_mapping.items()
         # Refuse the temptation to guess. If there are multiple volumes
         # attached to an instance, it could be raided/lvm/etc and we need
@@ -71,7 +84,7 @@ class SnapshotRunner(object):
         if len(devs) > 2:
             log.warning(
                 "Not backing up instance: %s, more than one volume", i.id)
-            return None
+            return
 
         for dev_name, bdt in devs:
             if not bdt.volume_id:
@@ -85,7 +98,7 @@ class SnapshotRunner(object):
         now = datetime.now(tzutc())
         log.info("Creating snapshots for %s on %s" % (
             period, now.strftime("%Y/%m/%d")))
-        for r, i in self.get_snapshot_instances():
+        for r, i in self.get_snapshot_instances(options):
             with self.lock.acquire("snapshot-%s" % i.id):
                 for vol_id, dev in self.get_instance_volumes(i):
                     self._snapshot_instance(r, i, vol_id, dev, now, period)
@@ -120,9 +133,13 @@ class SnapshotRunner(object):
                   i.id, vol_id, description)
         snapshot = self.ec2.create_snapshot(vol_id, description)
         snapshot.add_tag('Name', description)
+
+        for k, v in i.tags.items():
+            snapshot.add_tag(k, v)
+
         snapshot.add_tag('app_id', r['app_id'])
         snapshot.add_tag('inst_snap', "%s/%s" % (i.id, period))
-        snapshot.add_tag('dev', dev)
+        snapshot.add_tag('inst_dev', dev)
 
         # Trim extras
         backup_count = self.config.get("%s-backups" % period)
@@ -136,9 +153,7 @@ class SnapshotRunner(object):
         for s in snapshots[backup_count:]:
             s.delete()
 
-    def register(self, options):
-        """Register an instance for the snapshot system.
-        """
+    def _get_instance(self, options):
         reservations = self.ec2.get_all_instances([options.instance_id])
 
         if not len(reservations) == 1:
@@ -147,9 +162,19 @@ class SnapshotRunner(object):
         if not len(reservations[0].instances) == 1:
             log.error("Invalid instance id %s" % options.instance_id)
             return
-
-        log.info("Registering snapshot instance")
         instance = reservations[0].instances[0]
+        return instance
+
+    def register(self, options):
+        """Register an instance for the snapshot system.
+        """
+        instance = getattr(options, 'instance', None)
+        if instance is None:
+            instance = self._get_instance(options)
+            if instance is None:
+                return
+        log.info("Registering snapshot instance")
+
         vol_id = self.get_instance_volume(instance)
         if vol_id is None:
             return
@@ -175,6 +200,7 @@ def setup_parser():
 
     subs = parser.add_subparsers()
 
+    # Register instance
     sub_parser = subs.add_parser(
         "register", help="Register instances to the backup system")
     sub_parser.add_argument(
@@ -185,27 +211,21 @@ def setup_parser():
         "-u", "--unit")
     sub_parser.set_defaults(func='register')
 
+    # Take snapshots for period.
     sub_parser = subs.add_parser(
-        "run", help="Run the backup system")
+        "run", help="Run the backup system")   
     sub_parser.add_argument(
         "-p", "--period", default="daily",
         choices=["daily", "weekly", "monthly"])
+    sub_parser.add_argument(
+        "-t", "--tag", default="",
+        help="Backup instances matching tag, form is --tag=k:v")
     sub_parser.set_defaults(func='run_period')
 
     return parser
 
 
-def main():
-    try:
-        _main()
-    except SystemExit:
-        pass
-    except:
-        import pdb, traceback, sys
-        traceback.print_exc()
-        pdb.post_mortem(sys.exc_info()[-1])
-
-def _main():
+def cli():
     from boto import ec2
     from boto import dynamodb
 
@@ -234,6 +254,10 @@ def _main():
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key)
 
+    tagged_instances = options.tag or config.get("tag")
+    if tagged_instances:
+        pass
+
     log.debug("Setting up dynamodb tables")
     instance_db = get_or_create_table(
         db_api, INSTANCE_TABLE,
@@ -248,6 +272,29 @@ def _main():
     runner = SnapshotRunner(config, ec2_api, instance_db, lock)
     run_method = getattr(runner, options.func)
     run_method(options)
+
+
+# Juju integration
+
+class SnapshotController(BaseController):
+
+    _table_name = "awsjuju-snapshots"
+    _table_options = {}
+
+    def __init__(self, unit=None):
+        self.unit = unit or Unit()
+
+    def on_joined(self):
+        lock = self.get_lock("%s-%s" % (self.unit.env_id, self.unit.remote_unit))
+        ec2 = self.get_config()
+        instance = self.get_instance()
+
+
+def main():
+    import sys
+    logging.basicConfig(level=logging.DEBUG)
+    logging.getLogger("boto").setLevel(logging.INFO)
+    SnapshotController.main(sys.argv[1])
 
 if __name__ == '__main__':
     main()

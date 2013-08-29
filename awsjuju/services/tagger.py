@@ -1,3 +1,4 @@
+import sys
 from awsjuju.common import Unit, BaseController
 
 
@@ -5,18 +6,6 @@ class Controller(BaseController):
 
     def __init__(self, unit=None):
         self.unit = unit or Unit()
-
-    def on_joined(self):
-        tags = self.get_tags()
-        ec2 = self.get_ec2()
-
-        instance = self.get_instance(ec2)
-        tags['Name'] = self.unit.remote_unit
-        self.update_tags(instance, tags)
-
-        instance = self.get_bootstrap(ec2)
-        tags['Name'] = 'juju-state-server'
-        self.update_tags(instance, tags)
 
     def get_tags(self):
         tags = {}
@@ -38,7 +27,7 @@ class Controller(BaseController):
         return result[0].instances[0]
 
     def update_tags(self, instance, tags):
-        # be parsiminous as each tag is a roundtrip.
+        # be parsiminous as each tag modification is a roundtrip.
         updates = {}
         for k, v in tags.items():
             if instance.tags.get(k) != v:
@@ -47,10 +36,21 @@ class Controller(BaseController):
         for k, v in updates.items():
             instance.add_tag(k, v)
 
+    def on_joined(self):
+        tags = self.get_tags()
+        ec2 = self.get_ec2()
+
+        instance = self.get_instance(ec2)
+        tags['Name'] = self.unit.remote_unit
+        self.update_tags(instance, tags)
+
+        instance = self.get_bootstrap(ec2)
+        tags['Name'] = 'juju-state-server-%s' % self.unit.env_uuid
+        self.update_tags(instance, tags)
+
 
 def main():
-    pass
-
+    Controller.main(sys.argv[1])
 
 if __name__ == '__main__':
     main()

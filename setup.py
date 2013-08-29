@@ -16,5 +16,5 @@ setup(name='awsjuju',
       install_requires=["boto >= 2.9.0", "PyYAML"],
       entry_points={
           "console_scripts": [
-              'aws-snapshot = awsjuju.services.snapshot:main']},
+              'aws-snapshot = awsjuju.services.snapshot:cli']},
       )
