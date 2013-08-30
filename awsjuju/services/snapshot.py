@@ -12,9 +12,11 @@ import logging
 import os
 import operator
 import subprocess
+import sys
 import yaml
 
-from awsjuju.common import get_or_create_table, BaseController, Unit
+from awsjuju.common import get_or_create_table, BaseController
+from awsjuju.unit import Unit
 from awsjuju.lock import Lock
 
 log = logging.getLogger("aws-snapshot")
@@ -32,6 +34,7 @@ class SnapshotRunner(object):
         "daily": timedelta(0.9),
         "weekly": timedelta(6.9),
         "monthly": timedelta(27.5)}
+
 
     def __init__(self, config, ec2, instance_db, lock):
         self.config = config
@@ -52,8 +55,10 @@ class SnapshotRunner(object):
         """Support instance selection for backup based on a tag value.
         """
         tag_name, tag_value = tag.split(":", 1)
-        return self.ec2.get_all_instances(
-            filters={'tag:%s' % tag_name: tag_value})
+        for r in self.ec2.get_all_instances(
+            filters={'tag:%s' % tag_name: tag_value}):
+            for i in r.instances:
+                yield ({}, i)
 
     def _get_registered_instances(self):
         """Support instance backup based on registration.
@@ -94,6 +99,7 @@ class SnapshotRunner(object):
     def run_period(self, options):
         """ Create backups for the given period for all registered instances.
         """
+
         period = options.period
         now = datetime.now(tzutc())
         log.info("Creating snapshots for %s on %s" % (
@@ -133,11 +139,20 @@ class SnapshotRunner(object):
                   i.id, vol_id, description)
         snapshot = self.ec2.create_snapshot(vol_id, description)
         snapshot.add_tag('Name', description)
-
+    
+        # Copy over instance tags to the snapshot except name.
         for k, v in i.tags.items():
+            if k == "Name":
+                continue
             snapshot.add_tag(k, v)
 
-        snapshot.add_tag('app_id', r['app_id'])
+        # If the instance was registered with an app id, and the
+        # instance doesn't already have one, then copy over the
+        # registed one as a tag.
+        if 'app_id' in r and not 'app_id' in i.tags:
+            snapshot.add_tag('app_id', r['app_id'])
+
+        # Record metadata for restoration and backup system
         snapshot.add_tag('inst_snap', "%s/%s" % (i.id, period))
         snapshot.add_tag('inst_dev', dev)
 
@@ -243,8 +258,14 @@ def cli():
         config = yaml.load(fh.read())
 
     access_key = config.get('access-key', os.environ.get('AWS_ACCESS_KEY_ID'))
-    secret_key = config.get('secret-key', os.environ.get('AWS_SECRET_KEY_ID'))
+    secret_key = config.get('secret-key', os.environ.get('AWS_SECRET_ACCESS_KEY'))
 
+    if not access_key or not secret_key:
+        print access_key
+        print secret_key
+        print "AWS Keys must be specified in environment."
+        sys.exit(1)
+    
     ec2_api = ec2.connect_to_region(
         options.region,
         aws_access_key_id=access_key,
