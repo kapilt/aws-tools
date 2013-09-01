@@ -17,6 +17,9 @@ class Controller(BaseController):
         return tags
 
     def get_bootstrap(self, ec2):
+        # TODO this seems to assume api stability around groups, should play nice
+        # with either group. This also is our only ability at the moment to retrieve
+        # the environment name.
         groups = [g.strip() for g in
                   self.ec2_metadata['security-groups'].split('\n')]
         groups.sort()
@@ -26,10 +29,12 @@ class Controller(BaseController):
             'instance.group': env_group})
         return result[0].instances[0]
 
-    def update_tags(self, instance, tags):
+    def update_tags(self, instance, tags, only_unset=True):
         # be parsiminous as each tag modification is a roundtrip.
         updates = {}
         for k, v in tags.items():
+            if only_unset and k in tags:
+                continue
             if instance.tags.get(k) != v:
                 updates[k] = v
 
@@ -42,11 +47,13 @@ class Controller(BaseController):
 
         instance = self.get_instance(ec2)
         tags['Name'] = self.unit.remote_unit
-        self.update_tags(instance, tags)
+        tags['juju-env'] =  self.unit.env_uuid
+        self.update_tags(instance, tags, only_unset=True)
 
         instance = self.get_bootstrap(ec2)
         tags['Name'] = 'juju-state-server-%s' % self.unit.env_uuid
-        self.update_tags(instance, tags)
+        tags['juju-env'] =  self.unit.env_uuid        
+        self.update_tags(instance, tags, only_unset=True)
 
 
 def main():
