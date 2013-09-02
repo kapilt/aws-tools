@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(name='awsjuju',
-      version="0.0.2",
+      version="0.0.3",
       classifiers=[
           'Intended Audience :: Developers',
           'Programming Language :: Python',

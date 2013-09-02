@@ -46,17 +46,26 @@ class SnapshotRunner(object):
         """ Get all instances registered for auto snapshots
         """
 
-        if options.tag:
-            return self._get_tagged_instances(options.tag)
+        if options.tag or options.groups:
+            return self._get_tagged_instances(options.tags, options.groups)
 
         return self._get_registered_instances()
 
-    def _get_tagged_instances(self, tag):
+    def _get_tagged_instances(self, tags=(), groups=(), instances=()):
         """Support instance selection for backup based on a tag value.
         """
-        tag_name, tag_value = tag.split(":", 1)
-        for r in self.ec2.get_all_instances(
-            filters={'tag:%s' % tag_name: tag_value}):
+        q = {}
+        for t in tags:
+            tag_name, tag_value = t.split(":", 1)
+            q.update({'tag:%s' % tag_name: tag_value})
+
+        for g in groups:
+            if g.startswith('sg'):
+                q.update({'group-id': g})
+            else:
+                q.update({'group-name': g})
+
+        for r in self.ec2.get_all_instances(instances=instances, filters=q):
             for i in r.instances:
                 yield ({}, i)
 
@@ -96,7 +105,19 @@ class SnapshotRunner(object):
                 continue
             yield bdt.volume_id, dev_name
 
-    def run_period(self, options):
+    def cmd_list_backups(self, options):
+        instances = self._get_tagged_instances(
+            options.tags, options.groups, options.instances)
+        snapshots = self._get_instance_snapshots(instances)
+        print yaml.dumps(snapshots, default_flow_style=False)
+        return snapshots
+
+    def cmd_restore_backup(self, options):
+        instances = self.ec2.get_all_instances(
+            options.instances, options.groups, options.tags)
+        return instances
+
+    def cmd_run_period(self, options):
         """ Create backups for the given period for all registered instances.
         """
 
@@ -109,18 +130,28 @@ class SnapshotRunner(object):
                 for vol_id, dev in self.get_instance_volumes(i):
                     self._snapshot_instance(r, i, vol_id, dev, now, period)
 
+    def _get_instance_snapshots(self, instances, period=None):
+        periods = period and [period] or self.allowed_periods
+        query = {}
+        for p in periods:
+            for i in instances:
+                query.update({'tag:inst_snap': "%s/%s" % (i.id, p)})
+        
+        # Get previous snapshots
+        snapshots = self.ec2.get_all_snapshots(
+            filters=query)
+        snapshots.sort(
+            key=operator.attrgetter('start_time'), reverse=True)
+        return snapshots
+
     def _snapshot_instance(self, r, i, vol_id, dev, now, period):
         """
         arg: r -> record
         arg: i -> boto ec2 instance
         arg: now -> datetime of cur time.
         """
-        # Get previous snapshots
-        snapshots = self.ec2.get_all_snapshots(
-            filters={'tag:inst_snap': "%s/%s" % (i.id, period)})
-        snapshots.sort(
-            key=operator.attrgetter('start_time'), reverse=True)
 
+        snapshots = self._get_instance_snapshots([i])
         name = r.get('unit_name') or i.tags.get('Name') or i.id
 
         # Check if its too soon for a new snapshot from the last
@@ -215,7 +246,7 @@ def setup_parser():
 
     subs = parser.add_subparsers()
 
-    # Register instance
+    # Register instance / Registration is optional
     sub_parser = subs.add_parser(
         "register", help="Register instances to the backup system")
     sub_parser.add_argument(
@@ -229,14 +260,32 @@ def setup_parser():
     # Take snapshots for period.
     sub_parser = subs.add_parser(
         "run", help="Run the backup system")   
+    sub_parser.set_defaults(func='cmd_run_period')
     sub_parser.add_argument(
         "-p", "--period", default="daily",
         choices=["daily", "weekly", "monthly"])
-    sub_parser.add_argument(
-        "-t", "--tag", default="",
-        help="Backup instances matching tag, form is --tag=k:v")
-    sub_parser.set_defaults(func='run_period')
 
+    def add_query_options(subparser):
+        sub_parser.add_argument(
+            "-t", "--tag", dest="tags", action="append",
+            help="Backup instances matching tag, form is --tag=k:v")
+        sub_parser.add_argument(
+            "-s", "--group", dest="groups", action="append",
+            help="Backup instances matching security group name or id")    
+        sub_parser.add_argument("instances", nargs="?")
+
+    sub_parser = subs.add_parser(
+        "list", help="List backups for an instance")
+    sub_parser.set_defaults(func='cmd_list_backups')
+    add_query_options(sub_parser)
+
+    #sub_parser = subs.add_parser(
+    #    "remove", help="Remove backups for an instance")
+
+    sub_parser = subs.add_parser(
+        "restore", help="Restore an instance")
+    sub_parser.set_defaults(func='cmd_list_backups')
+    add_query_options(sub_parser)
     return parser
 
 
@@ -261,8 +310,6 @@ def cli():
     secret_key = config.get('secret-key', os.environ.get('AWS_SECRET_ACCESS_KEY'))
 
     if not access_key or not secret_key:
-        print access_key
-        print secret_key
         print "AWS Keys must be specified in environment."
         sys.exit(1)
     
@@ -275,7 +322,7 @@ def cli():
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key)
 
-    tagged_instances = options.tag or config.get("tag")
+    tagged_instances = options.tags or config.get("tags")
     if tagged_instances:
         pass
 
@@ -292,8 +339,13 @@ def cli():
     log.debug("Starting snapshot runner")
     runner = SnapshotRunner(config, ec2_api, instance_db, lock)
     run_method = getattr(runner, options.func)
-    run_method(options)
 
+    try:
+        run_method(options)
+    except:
+        import pdb, sys, traceback
+        traceback.print_exc()
+        pdb.post_mortem(sys.exc_info()[-1])
 
 # Juju integration
 
