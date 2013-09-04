@@ -28,12 +28,6 @@ INSTANCE_TABLE = "awsjuju-snapshot-instances"
 
 
 class SnapshotBase(object):
-    pass
-
-class SnapshotRunner(object):
-
-    # key to min time since last backup b4 we take a new one for the
-    # period.
 
     allowed_periods = {
         "daily": timedelta(0.9),
@@ -46,6 +40,13 @@ class SnapshotRunner(object):
         self.ec2 = ec2
         self.instance_db = instance_db
         self.lock = lock
+
+    @staticmethod
+    def _flatten_instances(results):
+        instances = []
+        for reservation in results:
+            instances.extend(reservation.instances)
+        return instances
 
     def _get_tag_query(self, tags):
         """Form taggable resource query for a given set of tags."""
@@ -74,9 +75,11 @@ class SnapshotRunner(object):
         log.debug("Querying instances: %s filters: %s" % (
             instances, q))
 
+        instances = []
         for r in self.ec2.get_all_instances(instance_ids=instances, filters=q):
             for i in r.instances:
-                yield ({}, i)
+                instances.append(({}, i))
+        return instances
 
     def _get_registered_instances(self):
         """Support instance backup based on registration.
@@ -95,17 +98,14 @@ class SnapshotRunner(object):
                 i = r.instances.pop()
                 yield (record, i)
 
-
     def _get_instance_snapshots(
         self, instances=None, period=None, groups=None, tags=()):
         """  """
         query = {}
-
-        if instances:
-            periods = period and [period] or self.allowed_periods
-            for p in periods:
-                for i in instances:
-                   query.update({'tag:inst_snap': "%s/%s" % (i, p)})
+        if instances and period:
+            for i in instances:
+                query.update({'tag:inst_snap': "%s/%s" % (i, period)})
+                break
 
         if (not instances and not groups) and tags:
             query.update(self._get_tag_query(tags))
@@ -117,7 +117,7 @@ class SnapshotRunner(object):
             filters=query)
         snapshots.sort(
             key=operator.attrgetter('start_time'), reverse=True)
-        log.debug("Found %d snapshots" % (len(snapshots)))
+        log.debug("Found %d instance device snapshots" % (len(snapshots)))
         return snapshots
 
     def get_snapshot_instances(self, options):
@@ -127,6 +127,30 @@ class SnapshotRunner(object):
             return self._get_tagged_instances(options.tags, options.groups)
 
         return self._get_registered_instances()
+
+
+class SnapshotInstances(SnapshotBase):
+
+    def run(self, options):
+        """ Create backups for the given period for all registered instances.
+        """
+        period = options.period
+        now = datetime.now(tzutc())
+        log.info("Creating snapshots for %s on %s" % (
+            period, now.strftime("%Y/%m/%d")))
+
+        #import pdb; pdb.set_trace()
+        for r, i in self.get_snapshot_instances(options):
+            log.info("Processing instance %s:%s" % (i.id, i.tags["Name"]))
+            with self.lock.acquire("snapshot-%s" % i.id):
+                snapshots = self._get_instance_snapshots(
+                    instances=[i.id], period=period)
+                for vol_id, dev in self.get_instance_volumes(i):
+                    device_snapshots = [
+                        s for s in snapshots if s.tags.get('inst_dev') == dev]
+
+                    self._snapshot_instance(
+                        r, i, vol_id, dev, now, period, device_snapshots)
 
     def get_instance_volumes(self, i):
         if i.root_device_type != "ebs":
@@ -147,118 +171,12 @@ class SnapshotRunner(object):
                 continue
             yield bdt.volume_id, dev_name
 
-    def cmd_list_backups(self, options):
-        instances = filter(None, options.instances)
-
-        if not instances and options.groups:
-            groups = filter(None, options.groups)
-            if groups:
-                instances = self._get_tagged_instances(
-                    groups=groups,
-                    tags=options.tags)
-
-        snapshots = self._get_instance_snapshots(
-            instances=filter(None, options.instances), 
-            tags=options.tags)
-
-        results = []
-        for s in snapshots:
-            if not s.progress == "100%":
-                continue
-            results.append(
-                {'name': s.tags['Name'], 
-                 'created': s.start_time,
-                 'volume': s.volume_id,
-                 'instance': s.tags['inst_snap']})
-        return snapshots
-
-    def cmd_restore_backup(self, options):
-        # Retrieve all the instances to restore.
-        instances = self._get_tagged_instances(
-            instances=options.instances, 
-            groups=options.groups, 
-            tags=options.tags)
-        log.info("Found %d instances to restore", len(instances))
-
-        # Find the appropriate subset of snapshots to utilize or error.
-        log.info("Finding candidate backups for %s", options.period)
-        snapshots = self._get_instance_snapshots(
-            instances=instances, period=options.period)
-        instance_snapshots = self._get_snapshots_by_instance_for_time(
-            snapshots, options.backup_date, options.max_skew_seconds)
-
-        # Volume creation is concurrent but long running.
-        log.info("Creating volumes to restore")        
-        instance_volume_map = self._create_snapshot_volumes(instance_snapshots)
-
-        log.info("Stopping instances to restore")
-        self._stop_instances(instances)
-
-        log.info("Attaching restored volumes")
-        self._attach_volumes(instance_volume_map)
-
-        log.info("Starting instances")        
-        self.ec2.start_instances(instances)
-
-    @staticmethod
-    def _flatten_instances(results):
-        instances = []
-        for reservation in results:
-            instances.extend(reservation.instances)
-        return instances
-
-    def _attach_volumes(
-        self, instance_map, instance_volume_map, instance_snapshot_map):
-        """Attach volumes to instances
-        """
-        for instance_id, vol_id in instance_volume_map.items():
-            volume = instance_volume_map[instance_id]
-            snapshot = instance_snapshot_map[instance_id]
-            device = snapshot.tags['inst_dev']
-            instance = instance_map[instance_id]
-
-            # Detach the old one if attached
-            if device in instance.block_device_mapping:
-                previous_device = instance.block_device_mapping[device]
-                # Cant if previous device is the restored volume since it varies
-                # for restore multiple times from pitr. 
-                self.ec2.detach_volume(instance_id, previous_device.volume_id)
-
-            # Attach the new one
-            self.ec2.attach_volume(instance_id, volume.id)
-
-    def _stop_instances(self, instances):
-        stopping_instances = [i.id for i in instances if i.state == "running"]
-        self.ec2.stop_instances(stopping_instances)
-
-        while stopping_instances:
-            log.info("Waiting for instances to stop: %s" % stopping_instances)
-            stopping = self._flatten_instances(
-                self.ec2.get_all_instances(instance_ids=stopping_instances))
-            stopping_instances =  [i.id for i in stopping if i.state in (
-                'running', 'stopping')]
-            time.sleep(10)
-
-    def cmd_run_period(self, options):
-        """ Create backups for the given period for all registered instances.
-        """
-        period = options.period
-        now = datetime.now(tzutc())
-        log.info("Creating snapshots for %s on %s" % (
-            period, now.strftime("%Y/%m/%d")))
-        for r, i in self.get_snapshot_instances(options):
-            with self.lock.acquire("snapshot-%s" % i.id):
-                for vol_id, dev in self.get_instance_volumes(i):
-                    self._snapshot_instance(r, i, vol_id, dev, now, period)
-
-    def _snapshot_instance(self, r, i, vol_id, dev, now, period):
+    def _snapshot_instance(self, r, i, vol_id, dev, now, period, snapshots):
         """
         arg: r -> record
         arg: i -> boto ec2 instance
         arg: now -> datetime of cur time.
         """
-
-        snapshots = self._get_instance_snapshots([i])
         name = r.get('unit_name') or i.tags.get('Name') or i.id
 
         # Check if its too soon for a new snapshot from the last
@@ -266,15 +184,15 @@ class SnapshotRunner(object):
             last_snapshot = date_parse(snapshots[0].start_time)
             if now - last_snapshot < self.allowed_periods[period]:
                 log.warning(
-                    "Skipping %s, last snapshot for %s was %s",
-                    name, period, now - last_snapshot)
+                    "Skipping %s, last snapshot for %s was %s" % (
+                    name, period, now - last_snapshot))
                 return
 
         # Create new snapshot
         description = "%s %s %s" % (
             name, period.capitalize(), now.strftime("%Y-%m-%d"))
-        log.debug("Snapshotting %s on %s as %s",
-                  i.id, vol_id, description)
+        log.debug("Snapshotting %s on %s as %s" % (
+                  i.id, vol_id, description))
         snapshot = self.ec2.create_snapshot(vol_id, description)
         snapshot.add_tag('Name', description)
     
@@ -308,6 +226,128 @@ class SnapshotRunner(object):
         for s in snapshots[backup_count:]:
             s.delete()
 
+
+class ListSnapshots(SnapshotBase):
+
+    def run(self, options):
+        instances = filter(None, options.instances)
+
+        if not instances and options.groups:
+            groups = filter(None, options.groups)
+            if groups:
+                instances = self._get_tagged_instances(
+                    groups=groups,
+                    tags=options.tags)
+
+        snapshots = self._get_instance_snapshots(
+            instances=filter(None, options.instances), 
+            tags=options.tags,
+            period="daily")
+
+        results = []
+        for s in snapshots:
+            if not s.progress == "100%":
+                continue
+            results.append(
+                {'name': s.tags.get('Name'), 
+                 'created': s.start_time,
+                 'volume': s.volume_id,
+                 'instance': s.tags})
+        import json
+        print json.dumps(results, indent=2)
+        return snapshots
+
+
+class RestoreSnapshots(SnapshotBase):
+
+    def run(self, options):
+
+        r_date = date_parse(options.date)
+
+        # Retrieve all the instances to restore.
+        instances = self._get_tagged_instances(
+            instances=options.instances, 
+            groups=options.groups, 
+            tags=options.tags)
+        log.info("Found %d instances to restore" % len(instances))
+
+        # Find the appropriate subset of snapshots to utilize or error.
+        log.info("Finding candidate backups for %s", options.date)
+        snapshots = self._get_instance_snapshots(
+            instances=instances, 
+            tags=options.tags, 
+            period=options.period)
+
+        instance_snapshots = self._get_snapshots_by_instance_for_time(
+            snapshots, r_date, options.max_skew_seconds)
+
+        # Volume creation is concurrent but long running.
+        log.info("Creating volumes to restore")        
+        instance_volume_map = self._create_snapshot_volumes(instance_snapshots)
+
+        log.info("Stopping instances to restore")
+        self._stop_instances(instances)
+
+        log.info("Attaching restored volumes")
+        self._attach_volumes(instance_volume_map)
+
+        log.info("Starting instances")        
+        self.ec2.start_instances(instances)
+
+    def _get_snapshots_by_instance_for_time(self, snapshots, r_date, skew):
+        instance_snapshots = {}
+
+        for s in snapshots:
+            start_date = date_parse(s.start_time)
+            if start_date < r_date:
+                continue
+
+            inst_id, period = s.tags.get("inst_snap", "/").split("/", 1)
+            if not inst_id:
+                log.warning(
+                    "Snapshot with invalid inst_snapshot %s %s" % (
+                        s.id, s.tags))
+            if inst_id not in instance_snapshots:
+                instance_snapshots[inst_id] = s
+                continue
+
+            if date_parse(instance_snapshots[inst_id].start_time) > start_date:
+                instance_snapshots[inst_id] = s
+
+        return instance_snapshots
+
+    def _attach_volumes(
+        self, instance_map, instance_volume_map, instance_snapshot_map):
+        """Attach volumes to instances
+        """
+        for instance_id, vol_id in instance_volume_map.items():
+            volume = instance_volume_map[instance_id]
+            snapshot = instance_snapshot_map[instance_id]
+            device = snapshot.tags['inst_dev']
+            instance = instance_map[instance_id]
+
+            # Detach the old one if attached
+            if device in instance.block_device_mapping:
+                previous_device = instance.block_device_mapping[device]
+                # Cant if previous device is the restored volume since it varies
+                # for restore multiple times from pitr. 
+                self.ec2.detach_volume(instance_id, previous_device.volume_id)
+
+            # Attach the new one
+            self.ec2.attach_volume(instance_id, volume.id)
+
+    def _stop_instances(self, instances):
+        stopping_instances = [i.id for i in instances if i.state == "running"]
+        self.ec2.stop_instances(stopping_instances)
+
+        while stopping_instances:
+            log.info("Waiting for instances to stop: %s" % stopping_instances)
+            stopping = self._flatten_instances(
+                self.ec2.get_all_instances(instance_ids=stopping_instances))
+            stopping_instances =  [i.id for i in stopping if i.state in (
+                'running', 'stopping')]
+            time.sleep(10)
+
     def _get_instance(self, options):
         reservations = self.ec2.get_all_instances([options.instance_id])
 
@@ -319,6 +359,9 @@ class SnapshotRunner(object):
             return
         instance = reservations[0].instances[0]
         return instance
+
+
+class RegisterInstance(SnapshotBase):
 
     def register(self, options):
         """Register an instance for the snapshot system.
@@ -344,6 +387,26 @@ class SnapshotRunner(object):
         return True
 
 
+class RemoveSnapshots(SnapshotBase):
+
+    def run(self, options):
+        # TODO can't query for dead/terminated instances, we could just be 
+        # doing garbage collection.
+        #instances = self.get_snapshot_instances(options)
+        #log.info("Removing snapshots for these instances %d" % len(instances))
+
+        snapshots = self._get_instance_snapshots(
+            tags=options.tags,
+            instances=filter(None, options.instances),
+            period=options.period)
+
+        log.info("Removing %d snapshots for period %s" % (
+            len(snapshots), options.period))
+
+        for s in snapshots:
+            self.ec2.delete_snapshot(s.id)
+
+
 def setup_parser():
     parser = argparse.ArgumentParser("aws-snapshot")
     parser.add_argument(
@@ -352,20 +415,6 @@ def setup_parser():
     parser.add_argument(
         "-r", "--region", default="us-east-1",
         help="Region to operate in")
-
-    subs = parser.add_subparsers()
-
-    # Register instance / Registration is optional
-    sub_parser = subs.add_parser(
-        "register", help="Register instances to the backup system")
-    sub_parser.add_argument(
-        "-i", "--instance", required=True, dest="instance_id")
-    sub_parser.add_argument(
-        "-a", "--app", required=True, dest="app_id")
-    sub_parser.add_argument(
-        "-u", "--unit")
-    sub_parser.set_defaults(func='register')
-
 
     def add_query_options(subparser):
         sub_parser.add_argument(
@@ -376,27 +425,59 @@ def setup_parser():
             help="Backup instances matching security group name or id")    
         sub_parser.add_argument("instances", nargs="?", action="append")
 
-    # Take snapshots for period.
+    subs = parser.add_subparsers()
+
     sub_parser = subs.add_parser(
-        "run", help="Run the backup system")   
-    sub_parser.set_defaults(func='cmd_run_period')
+        "register", 
+        help="Register instances to the backup system")
+    sub_parser.add_argument(
+        "-i", "--instance", required=True, dest="instance_id")
+    sub_parser.add_argument(
+        "-a", "--app", required=True, dest="app_id")
+    sub_parser.add_argument(
+        "-u", "--unit")
+    sub_parser.set_defaults(cmd=RegisterInstance)
+
+
+    sub_parser = subs.add_parser(
+        "run", 
+        help="Run the backup system")   
+    sub_parser.set_defaults(cmd=SnapshotInstances)
     sub_parser.add_argument(
         "-p", "--period", default="daily",
         choices=["daily", "weekly", "monthly"])
     add_query_options(sub_parser)
 
-    sub_parser = subs.add_parser(
-        "list", help="List backups for an instance")
-    sub_parser.set_defaults(func='cmd_list_backups')
-    add_query_options(sub_parser)
-
-    #sub_parser = subs.add_parser(
-    #    "remove", help="Remove backups for an instance")
 
     sub_parser = subs.add_parser(
-        "restore", help="Restore an instance")
-    sub_parser.set_defaults(func='cmd_list_backups')
+        "remove", 
+        help="Run the backup system")   
+    sub_parser.set_defaults(cmd=RemoveSnapshots)
+    sub_parser.add_argument(
+        "-p", "--period", default="daily",
+        choices=["daily", "weekly", "monthly"])
     add_query_options(sub_parser)
+
+
+    sub_parser = subs.add_parser(
+        "list", 
+        help="List backups for an instance")
+    sub_parser.set_defaults(cmd=ListSnapshots)
+    add_query_options(sub_parser)
+
+
+    sub_parser = subs.add_parser(
+        "restore", 
+        help="Restore instances from backups")
+    sub_parser.set_defaults(cmd=RestoreSnapshots)
+    sub_parser.add_argument(
+        "-d", "--date",
+        help="Use snapshot from before this date")
+    sub_parser.add_argument(
+        "-p", "--period", default=None,
+        help="Only use this type of backup (weekly, daily, month) default all")
+    add_query_options(sub_parser)
+
     return parser
 
 
@@ -449,12 +530,10 @@ def cli():
         db_api, subprocess.check_output(['hostname']),
         lock_db, None, ttl=120, delay=10, attempts=3)
 
-    log.debug("Starting snapshot runner")
-    runner = SnapshotRunner(config, ec2_api, instance_db, lock)
-    run_method = getattr(runner, options.func)
-
+    log.debug("Running cmd: %s" % options.cmd.__name__)
+    command = options.cmd(config, ec2_api, instance_db, lock)
     try:
-        run_method(options)
+        command.run(options)
     except:
         import pdb, sys, traceback
         traceback.print_exc()

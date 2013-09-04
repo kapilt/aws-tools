@@ -1,0 +1,49 @@
+Automated Backups
+-----------------
+
+Backups taken against a selection of instances, for configurable number of daily, weekly, monthly copies. Only this count of backups will be kept for each period, automatically pruning older snapshots.
+
+Multiple instances of the backup service can be run for HA. Distributed locks are taken out per instance using dynamodb.
+
+Selective running, can backup all machines, a subset by tag or group, or only those explicitly related via juju service relations.
+
+Allows restoration of an instance or set of instances to a point in time (more of a window, matches to the nearest snapshot date for an instance that's as old as point time).
+
+Allows querying backups for an instance or set of instances.
+
+Copies over instance tags for consistent reporting/querying, utilizes two tags for the backup (backup period & time, and device)
+
+
+Quick Usage
+-----------
+
+Deploy and relate to services whose units should be backed up.
+
+$ juju deploy aws-snapshot --config aws-creds.yaml
+$ juju add-relation aws-snapshot mysql
+
+Alternatively backup all units in an environment
+
+$ juju deploy aws-snapshot --config "all_env_instances=true"
+
+CLI Commands
+------------
+
+The awsjuju package will install an aws-snapshot cli, that has
+subcommands for listing backups, registering instances, running the
+backup system, or restoring instances. 
+
+Configuration
+-------------
+
+The number of copies to keep for each backup period is specificed via yaml/json config file.
+
+daily-backups, weekly-backups, monthly-backups integers can all be specified. 
+
+Futures
+-------
+ - Cross region copies for DR
+ - Accept SQS inputs for integration
+ - Remove backups for an instance (gc old snapshots for instances not present)
+
+
