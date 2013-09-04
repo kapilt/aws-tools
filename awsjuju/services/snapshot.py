@@ -131,7 +131,7 @@ class SnapshotRunner(object):
     def get_instance_volumes(self, i):
         if i.root_device_type != "ebs":
             log.warning(
-                "Not backing up instance: %s non ebs root device", i.id)
+                "Not backing up instance: %s/%s non ebs root device", i.id, i.tags.get("Name", "NA"))
             return
         devs = i.block_device_mapping.items()
         # Refuse the temptation to guess. If there are multiple volumes
@@ -139,7 +139,7 @@ class SnapshotRunner(object):
         # coordination with the instance to get a multi-volume consistent snap.
         if len(devs) > 2:
             log.warning(
-                "Not backing up instance: %s, more than one volume", i.id)
+                "Not backing up instance: %s/%s, more than one volume", i.id, i.tags.get("Name", "NA"))
             return
 
         for dev_name, bdt in devs:
@@ -299,9 +299,11 @@ class SnapshotRunner(object):
         snapshots.insert(0, snapshot)
         if len(snapshots) <= backup_count:
             return
-        log.info("Trimming excess %s snapshots %s" % (
+        log.info("Trimming excess %s snapshots %s max:%d existing:%d" % (
             period,
-            [s.tags.get('Name') for s in snapshots[backup_count:]]))
+            [s.tags.get('Name') for s in snapshots[backup_count:]],
+            backup_count,
+            len(snapshots)))
 
         for s in snapshots[backup_count:]:
             s.delete()
